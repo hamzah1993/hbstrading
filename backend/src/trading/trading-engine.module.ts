@@ -17,6 +17,7 @@ import { PaperTradingController } from './paper-trading.controller';
 import { PaperTradingService } from './paper-trading.service';
 import { RiskAwareTestnetStrategyExecutionService } from './risk-aware-testnet-strategy-execution.service';
 import { RiskBudgetService } from './risk-budget.service';
+import { RecoveryStrategyService } from './recovery-strategy.service';
 import { StrategyController } from './strategy.controller';
 import { StrategyService } from './strategy.service';
 import { TestnetActionRetrySchedulerService } from './testnet-action-retry-scheduler.service';
@@ -44,6 +45,7 @@ import { TradingEngineService } from './trading-engine.service';
   ],
   providers: [
     RiskBudgetService,
+    RecoveryStrategyService,
     TradingEngineService,
     PaperTradingService,
     StrategyService,
@@ -75,6 +77,7 @@ import { TradingEngineService } from './trading-engine.service';
   ],
   exports: [
     RiskBudgetService,
+    RecoveryStrategyService,
     TradingEngineService,
     PaperTradingService,
     StrategyService,

@@ -5,6 +5,7 @@ export type TestnetRiskActionType =
   | 'INITIAL_ENTRY'
   | 'DCA_ENTRY'
   | 'INDEPENDENT_ENTRY'
+  | 'RECOVERY_DCA_ENTRY'
   | 'PARENT_EXIT'
   | 'INDEPENDENT_EXIT'
   | undefined;

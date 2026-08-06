@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RiskBudgetService } from './risk-budget.service';
+import { RecoveryStrategyService } from './recovery-strategy.service';
 
 export type StrategyInput = {
   name: string;
@@ -15,6 +16,11 @@ export type StrategyInput = {
   dcaMultiplier: number;
   takeProfitPercent: number;
   independentFromLevel: number;
+  recoveryEnabled?: boolean;
+  recoveryMaxOrders?: number;
+  recoveryStepPercents?: number[];
+  recoveryMultipliers?: number[];
+  recoveryTakeProfitPercent?: number;
 };
 
 @Injectable()
@@ -22,6 +28,7 @@ export class StrategyService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly riskBudget: RiskBudgetService,
+    private readonly recoveryStrategy: RecoveryStrategyService,
   ) {}
 
   async create(userId: string, input: StrategyInput) {
@@ -44,6 +51,11 @@ export class StrategyService {
           dcaMultiplier: normalized.dcaMultiplier,
           takeProfitPercent: normalized.takeProfitPercent,
           independentFromLevel: normalized.independentFromLevel,
+          recoveryEnabled: normalized.recoveryEnabled,
+          recoveryMaxOrders: normalized.recoveryMaxOrders,
+          recoveryStepPercents: normalized.recoveryStepPercents,
+          recoveryMultipliers: normalized.recoveryMultipliers,
+          recoveryTakeProfitPercent: normalized.recoveryTakeProfitPercent,
         },
       });
     } catch (error) {
@@ -81,6 +93,11 @@ export class StrategyService {
       dcaMultiplier: input.dcaMultiplier ?? Number(existing.dcaMultiplier),
       takeProfitPercent: input.takeProfitPercent ?? Number(existing.takeProfitPercent),
       independentFromLevel: input.independentFromLevel ?? existing.independentFromLevel,
+      recoveryEnabled: input.recoveryEnabled ?? existing.recoveryEnabled,
+      recoveryMaxOrders: input.recoveryMaxOrders ?? existing.recoveryMaxOrders,
+      recoveryStepPercents: input.recoveryStepPercents ?? (existing.recoveryStepPercents as number[]),
+      recoveryMultipliers: input.recoveryMultipliers ?? (existing.recoveryMultipliers as number[]),
+      recoveryTakeProfitPercent: input.recoveryTakeProfitPercent ?? Number(existing.recoveryTakeProfitPercent),
     });
     this.riskBudget.buildPlan(merged);
 
@@ -131,7 +148,7 @@ export class StrategyService {
         ? 'BINANCE_TESTNET'
         : 'BINANCE_LIVE';
 
-    return {
+    const normalized = {
       name,
       symbol,
       environment,
@@ -144,6 +161,13 @@ export class StrategyService {
       dcaMultiplier: Number(input.dcaMultiplier),
       takeProfitPercent: Number(input.takeProfitPercent),
       independentFromLevel: Number(input.independentFromLevel),
+      recoveryEnabled: input.recoveryEnabled ?? true,
+      recoveryMaxOrders: Number(input.recoveryMaxOrders ?? 5),
+      recoveryStepPercents: (input.recoveryStepPercents ?? [5, 8, 12, 18, 25]).map(Number),
+      recoveryMultipliers: (input.recoveryMultipliers ?? [1, 1.5, 2, 3, 5]).map(Number),
+      recoveryTakeProfitPercent: Number(input.recoveryTakeProfitPercent ?? 1.5),
     } as const;
+    this.recoveryStrategy.normalizeConfig(normalized);
+    return normalized;
   }
 }

@@ -5,7 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 export type ClaimTestnetStrategyActionInput = {
   strategyId: string;
   positionId?: string | null;
-  type: 'INITIAL_ENTRY' | 'DCA_ENTRY' | 'INDEPENDENT_ENTRY' | 'PARENT_EXIT' | 'INDEPENDENT_EXIT';
+  type: 'INITIAL_ENTRY' | 'DCA_ENTRY' | 'INDEPENDENT_ENTRY' | 'RECOVERY_DCA_ENTRY' | 'PARENT_EXIT' | 'INDEPENDENT_EXIT';
   side: 'BUY' | 'SELL';
   quantity?: number | null;
   quoteAmount?: number | null;

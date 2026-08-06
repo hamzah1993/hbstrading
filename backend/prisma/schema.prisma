@@ -68,6 +68,7 @@ enum StrategyActionType {
   INITIAL_ENTRY
   DCA_ENTRY
   INDEPENDENT_ENTRY
+  RECOVERY_DCA_ENTRY
   PARENT_EXIT
   INDEPENDENT_EXIT
 }
@@ -163,6 +164,11 @@ model TradingStrategy {
   dcaMultiplier                Decimal               @default(1) @db.Decimal(10, 4)
   takeProfitPercent            Decimal               @db.Decimal(10, 4)
   independentFromLevel         Int                   @default(5)
+  recoveryEnabled              Boolean               @default(true)
+  recoveryMaxOrders            Int                   @default(5)
+  recoveryStepPercents         Json                  @default("[5,8,12,18,25]")
+  recoveryMultipliers          Json                  @default("[1,1.5,2,3,5]")
+  recoveryTakeProfitPercent    Decimal               @default(1.5) @db.Decimal(10, 4)
   maxStrategyExposureQuote     Decimal?              @db.Decimal(28, 8)
   maxOrderQuote                Decimal?              @db.Decimal(28, 8)
   maxDailyRealizedLossQuote    Decimal?              @db.Decimal(28, 8)
@@ -192,6 +198,10 @@ model TradingPosition {
   averageEntryPrice Decimal              @default(0) @db.Decimal(28, 12)
   realizedPnlQuote  Decimal              @default(0) @db.Decimal(28, 8)
   dcaCount          Int                  @default(0)
+  recoveryMode      Boolean              @default(false)
+  recoveryDcaCount  Int                  @default(0)
+  recoveryAnchorPrice Decimal?            @db.Decimal(28, 12)
+  recoveryTakeProfitPrice Decimal?        @db.Decimal(28, 12)
   nextDcaPrice      Decimal?             @db.Decimal(28, 12)
   takeProfitPrice   Decimal?             @db.Decimal(28, 12)
   orders            TradingOrder[]

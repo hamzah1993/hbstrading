@@ -9,7 +9,7 @@ export type ExecuteTestnetStrategyInput = {
   strategyId: string;
   side: 'BUY' | 'SELL';
   quantity: number;
-  actionType?: 'INITIAL_ENTRY' | 'DCA_ENTRY' | 'INDEPENDENT_ENTRY' | 'PARENT_EXIT' | 'INDEPENDENT_EXIT';
+  actionType?: 'INITIAL_ENTRY' | 'DCA_ENTRY' | 'INDEPENDENT_ENTRY' | 'RECOVERY_DCA_ENTRY' | 'PARENT_EXIT' | 'INDEPENDENT_EXIT';
   actionKey?: string;
   level?: number | null;
   triggerPrice?: number | null;
