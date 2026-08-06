@@ -3,12 +3,15 @@ import { MarketDataService } from '../market/market-data.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisLockService, type RedisLock } from '../redis/redis-lock.service';
 import { TestnetStrategyExecutionService } from './testnet-strategy-execution.service';
+import { RecoveryStrategyService } from './recovery-strategy.service';
 
 export type TestnetStrategyRunnerAction =
   | 'OPEN'
   | 'DCA'
   | 'INDEPENDENT_ENTRY'
   | 'INDEPENDENT_TAKE_PROFIT'
+  | 'RECOVERY_DCA'
+  | 'RECOVERY_TAKE_PROFIT'
   | 'TAKE_PROFIT'
   | 'HOLD'
   | 'SKIP'
@@ -49,6 +52,7 @@ export class TestnetStrategyRunnerService {
     private readonly marketData: MarketDataService,
     private readonly testnetExecution: TestnetStrategyExecutionService,
     private readonly redisLock: RedisLockService,
+    private readonly recoveryStrategy: RecoveryStrategyService,
   ) {}
 
   async runUserStrategies(userId: string): Promise<TestnetStrategyRunnerResult[]> {
@@ -169,6 +173,7 @@ export class TestnetStrategyRunnerService {
           actionKey,
           level: 1,
           triggerPrice: quote.price,
+          plannedQuoteAmount: quoteAmount,
           allowRunningStrategy: true,
         });
 
@@ -180,6 +185,106 @@ export class TestnetStrategyRunnerService {
           quantity,
           positionId: execution.savedOrder?.positionId,
           message: execution.duplicate ? 'Initial entry action was already claimed' : undefined,
+        };
+      }
+
+      if (openPosition.recoveryMode) {
+        const basket = this.recoveryStrategy.basketTotals(openPosition, openPosition.subPositions ?? []);
+        const globalTakeProfit = Number(
+          openPosition.recoveryTakeProfitPrice ?? this.recoveryStrategy.globalTakeProfit(strategy, basket) ?? 0,
+        );
+        if (globalTakeProfit > 0 && quote.price >= globalTakeProfit) {
+          const independentToClose = [...(openPosition.subPositions ?? [])]
+            .filter((item: any) => item.status === 'OPEN' && Number(item.quantity) > 0)
+            .sort((a: any, b: any) => Number(b.level) - Number(a.level))[0];
+          if (independentToClose) {
+            const quantity = Number(independentToClose.quantity);
+            const actionKey = `strategy:${strategy.id}:position:${openPosition.id}:recovery-independent-exit:${independentToClose.id}`;
+            const execution = await this.testnetExecution.executeMarketOrder(userId, {
+              strategyId: strategy.id,
+              side: 'SELL',
+              quantity,
+              actionType: 'INDEPENDENT_EXIT',
+              actionKey,
+              level: Number(independentToClose.level),
+              triggerPrice: globalTakeProfit,
+              allowRunningStrategy: true,
+            });
+            return {
+              strategyId: strategy.id,
+              symbol: strategy.symbol,
+              action: execution.duplicate ? 'SKIP' : 'RECOVERY_TAKE_PROFIT',
+              price: quote.price,
+              quantity,
+              positionId: openPosition.id,
+              subPositionId: independentToClose.id,
+              message: execution.duplicate ? 'Recovery independent exit was already claimed' : undefined,
+            };
+          }
+
+          const parentQuantity = Number(openPosition.totalQuantity);
+          if (parentQuantity > 0) {
+            const actionKey = `strategy:${strategy.id}:position:${openPosition.id}:recovery-parent-exit`;
+            const execution = await this.testnetExecution.executeMarketOrder(userId, {
+              strategyId: strategy.id,
+              side: 'SELL',
+              quantity: parentQuantity,
+              actionType: 'PARENT_EXIT',
+              actionKey,
+              triggerPrice: globalTakeProfit,
+              allowRunningStrategy: true,
+            });
+            return {
+              strategyId: strategy.id,
+              symbol: strategy.symbol,
+              action: execution.duplicate ? 'SKIP' : 'RECOVERY_TAKE_PROFIT',
+              price: quote.price,
+              quantity: parentQuantity,
+              positionId: openPosition.id,
+              message: execution.duplicate ? 'Recovery parent exit was already claimed' : undefined,
+            };
+          }
+        }
+
+        const remainingBudget = Math.max(Number(strategy.riskBudgetQuote) - basket.costQuote, 0);
+        const recoveryLeg = this.recoveryStrategy.nextLeg(strategy, {
+          recoveryDcaCount: Number(openPosition.recoveryDcaCount),
+          anchorPrice: Number(openPosition.recoveryAnchorPrice),
+          baseOrderQuote: Number(strategy.baseOrderQuote),
+          remainingRiskBudget: remainingBudget,
+        });
+        if (recoveryLeg && recoveryLeg.quoteAmount > 0 && quote.price <= recoveryLeg.triggerPrice) {
+          const quantity = recoveryLeg.quoteAmount / quote.price;
+          const actionKey = `strategy:${strategy.id}:position:${openPosition.id}:recovery-dca:${recoveryLeg.recoveryLevel}`;
+          const execution = await this.testnetExecution.executeMarketOrder(userId, {
+            strategyId: strategy.id,
+            side: 'BUY',
+            quantity,
+            actionType: 'RECOVERY_DCA_ENTRY',
+            actionKey,
+            level: Number(strategy.maxDcaOrders) + recoveryLeg.recoveryLevel + 1,
+            triggerPrice: recoveryLeg.triggerPrice,
+            plannedQuoteAmount: recoveryLeg.quoteAmount,
+            allowRunningStrategy: true,
+          });
+          return {
+            strategyId: strategy.id,
+            symbol: strategy.symbol,
+            action: execution.duplicate ? 'SKIP' : 'RECOVERY_DCA',
+            price: quote.price,
+            quantity,
+            positionId: openPosition.id,
+            message: execution.duplicate ? 'Recovery DCA action was already claimed' : undefined,
+          };
+        }
+
+        return {
+          strategyId: strategy.id,
+          symbol: strategy.symbol,
+          action: 'HOLD',
+          price: quote.price,
+          positionId: openPosition.id,
+          message: recoveryLeg ? 'Recovery mode is waiting for the next DCA or global TP' : 'Recovery maximum or risk budget reached; waiting for global TP',
         };
       }
 
@@ -254,6 +359,43 @@ export class TestnetStrategyRunnerService {
         };
       }
 
+      const recoveryAnchor = openPosition.subPositions?.find(
+        (item: any) => Number(item.level) === Number(strategy.independentFromLevel) && item.status === 'OPEN',
+      );
+      if (recoveryAnchor) {
+        const basket = this.recoveryStrategy.basketTotals(openPosition, openPosition.subPositions);
+        const recoveryLeg = this.recoveryStrategy.nextLeg(strategy, {
+          recoveryDcaCount: 0,
+          anchorPrice: Number(recoveryAnchor.entryPrice),
+          baseOrderQuote: Number(strategy.baseOrderQuote),
+          remainingRiskBudget: Math.max(Number(strategy.riskBudgetQuote) - basket.costQuote, 0),
+        });
+        if (recoveryLeg && recoveryLeg.quoteAmount > 0 && quote.price <= recoveryLeg.triggerPrice) {
+          const quantity = recoveryLeg.quoteAmount / quote.price;
+          const actionKey = `strategy:${strategy.id}:position:${openPosition.id}:recovery-dca:${recoveryLeg.recoveryLevel}`;
+          const execution = await this.testnetExecution.executeMarketOrder(userId, {
+            strategyId: strategy.id,
+            side: 'BUY',
+            quantity,
+            actionType: 'RECOVERY_DCA_ENTRY',
+            actionKey,
+            level: Number(strategy.maxDcaOrders) + recoveryLeg.recoveryLevel + 1,
+            triggerPrice: recoveryLeg.triggerPrice,
+            plannedQuoteAmount: recoveryLeg.quoteAmount,
+            allowRunningStrategy: true,
+          });
+          return {
+            strategyId: strategy.id,
+            symbol: strategy.symbol,
+            action: execution.duplicate ? 'SKIP' : 'RECOVERY_DCA',
+            price: quote.price,
+            quantity,
+            positionId: openPosition.id,
+            message: execution.duplicate ? 'Recovery activation action was already claimed' : undefined,
+          };
+        }
+      }
+
       const dcaCount = Number(openPosition.dcaCount);
       const maxDcaOrders = Number(strategy.maxDcaOrders);
       const nextLevel = dcaCount + 2;
@@ -284,10 +426,11 @@ export class TestnetStrategyRunnerService {
       const multiplier = Number(strategy.dcaMultiplier);
       const baseOrderQuote = Number(strategy.baseOrderQuote);
       const requestedQuote = baseOrderQuote * Math.pow(multiplier, dcaCount + 1);
-      const remainingBudget = Math.max(
-        Number(strategy.riskBudgetQuote) - Number(openPosition.totalCostQuote),
-        0,
-      );
+      const totalExposure = this.recoveryStrategy.basketTotals(
+        openPosition,
+        openPosition.subPositions ?? [],
+      ).costQuote;
+      const remainingBudget = Math.max(Number(strategy.riskBudgetQuote) - totalExposure, 0);
       const quoteAmount = Math.min(requestedQuote, remainingBudget);
 
       if (!Number.isFinite(quoteAmount) || quoteAmount <= 0) {
@@ -317,6 +460,7 @@ export class TestnetStrategyRunnerService {
         actionKey,
         level: nextLevel,
         triggerPrice: nextDcaPrice,
+        plannedQuoteAmount: quoteAmount,
         allowRunningStrategy: true,
       });
 

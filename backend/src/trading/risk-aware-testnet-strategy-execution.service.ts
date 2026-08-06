@@ -8,6 +8,7 @@ import {
 } from './testnet-strategy-execution.service';
 import { TestnetStrategyActionService } from './testnet-strategy-action.service';
 import { TestnetStrategyRiskService } from './testnet-strategy-risk.service';
+import { RecoveryStrategyService } from './recovery-strategy.service';
 
 /**
  * Runtime enforcement wrapper for every Binance Testnet order path.
@@ -25,8 +26,9 @@ export class RiskAwareTestnetStrategyExecutionService extends TestnetStrategyExe
     strategyActions: TestnetStrategyActionService,
     notifications: NotificationsService,
     private readonly risk: TestnetStrategyRiskService,
+    recoveryStrategy: RecoveryStrategyService,
   ) {
-    super(riskPrisma, testnetOrders, strategyActions, notifications);
+    super(riskPrisma, testnetOrders, strategyActions, notifications, recoveryStrategy);
   }
 
   override async executeMarketOrder(userId: string, input: ExecuteTestnetStrategyInput) {
@@ -43,8 +45,10 @@ export class RiskAwareTestnetStrategyExecutionService extends TestnetStrategyExe
     const estimatedPrice = Number(
       input.triggerPrice ?? openPosition?.averageEntryPrice ?? 0,
     );
-    const estimatedOrderQuote =
-      Number.isFinite(estimatedPrice) && estimatedPrice > 0
+    const plannedQuoteAmount = Number(input.plannedQuoteAmount ?? 0);
+    const estimatedOrderQuote = Number.isFinite(plannedQuoteAmount) && plannedQuoteAmount > 0
+      ? plannedQuoteAmount
+      : Number.isFinite(estimatedPrice) && estimatedPrice > 0
         ? input.quantity * estimatedPrice
         : 0;
 

@@ -46,26 +46,37 @@ export class TestnetStrategyRiskService {
     }
 
     const parentExposure = Number(openPosition?.totalCostQuote ?? 0);
+    const openIndependent = openPosition
+      ? await this.prisma.tradingSubPosition.findMany({
+          where: { positionId: openPosition.id, status: 'OPEN' },
+          select: { costQuote: true },
+        })
+      : [];
+    const independentExposure = openIndependent.reduce(
+      (sum, item) => sum + Number(item.costQuote),
+      0,
+    );
+    const totalExposure = parentExposure + independentExposure;
+
+    if (
+      estimatedOrderQuote > 0 &&
+      actionType && ['INITIAL_ENTRY', 'DCA_ENTRY', 'INDEPENDENT_ENTRY', 'RECOVERY_DCA_ENTRY'].includes(actionType) &&
+      totalExposure + estimatedOrderQuote > Number(strategy.riskBudgetQuote) + Number.EPSILON
+    ) {
+      throw new BadRequestException('Order would exceed the configured fixed risk budget');
+    }
     if (
       estimatedOrderQuote > 0 &&
       strategy.maxStrategyExposureQuote !== null &&
-      parentExposure + estimatedOrderQuote > Number(strategy.maxStrategyExposureQuote)
+      totalExposure + estimatedOrderQuote > Number(strategy.maxStrategyExposureQuote)
     ) {
       throw new BadRequestException('Order would exceed the strategy exposure limit');
     }
 
     if (actionType === 'INDEPENDENT_ENTRY' && openPosition) {
-      const openIndependent = await this.prisma.tradingSubPosition.findMany({
-        where: { positionId: openPosition.id, status: 'OPEN' },
-        select: { costQuote: true },
-      });
       if (openIndependent.length >= Number(strategy.maxOpenIndependentPositions)) {
         throw new BadRequestException('Maximum open independent positions reached');
       }
-      const independentExposure = openIndependent.reduce(
-        (sum, item) => sum + Number(item.costQuote),
-        0,
-      );
       if (
         estimatedOrderQuote > 0 &&
         strategy.maxIndependentExposureQuote !== null &&

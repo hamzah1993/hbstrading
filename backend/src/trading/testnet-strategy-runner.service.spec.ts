@@ -1,4 +1,5 @@
 import { TestnetStrategyRunnerService } from './testnet-strategy-runner.service';
+import { RecoveryStrategyService } from './recovery-strategy.service';
 
 describe('TestnetStrategyRunnerService', () => {
   const userId = 'user-1';
@@ -11,6 +12,11 @@ describe('TestnetStrategyRunnerService', () => {
     maxDcaOrders: 4,
     dcaMultiplier: 2,
     independentFromLevel: 4,
+    recoveryEnabled: true,
+    recoveryMaxOrders: 5,
+    recoveryStepPercents: [5, 8, 12, 18, 25],
+    recoveryMultipliers: [1, 1.5, 2, 3, 5],
+    recoveryTakeProfitPercent: 1.5,
     positions: [],
   };
 
@@ -56,6 +62,7 @@ describe('TestnetStrategyRunnerService', () => {
         marketData,
         testnetExecution,
         redisLock,
+        new RecoveryStrategyService(),
       ),
       prisma,
       marketData,
@@ -78,6 +85,7 @@ describe('TestnetStrategyRunnerService', () => {
       actionKey: 'strategy:strategy-1:initial-entry',
       level: 1,
       triggerPrice: 50,
+      plannedQuoteAmount: 100,
       allowRunningStrategy: true,
     });
     expect(redisLock.release).toHaveBeenCalledTimes(1);
@@ -168,6 +176,75 @@ describe('TestnetStrategyRunnerService', () => {
         side: 'SELL',
         actionType: 'INDEPENDENT_EXIT',
         level: 4,
+      }),
+    );
+  });
+
+  it('activates recovery DCA when price falls 5% below the first independent entry', async () => {
+    const strategy = {
+      ...baseStrategy,
+      positions: [{
+        id: 'position-1',
+        totalQuantity: 3,
+        totalCostQuote: 300,
+        dcaCount: 3,
+        recoveryMode: false,
+        recoveryDcaCount: 0,
+        nextDcaPrice: 78,
+        takeProfitPrice: 110,
+        subPositions: [{
+          id: 'sub-4', level: 4, status: 'OPEN', quantity: 1, costQuote: 80,
+          entryPrice: 80, takeProfitPrice: 81.2,
+        }],
+      }],
+    };
+    const { service, testnetExecution } = createService([strategy], 75);
+
+    const result = await service.runUserStrategies(userId);
+
+    expect(result[0].action).toBe('RECOVERY_DCA');
+    expect(testnetExecution.executeMarketOrder).toHaveBeenCalledWith(
+      userId,
+      expect.objectContaining({
+        actionType: 'RECOVERY_DCA_ENTRY',
+        actionKey: 'strategy:strategy-1:position:position-1:recovery-dca:1',
+        triggerPrice: 76,
+      }),
+    );
+  });
+
+  it('uses the global recovery TP and closes independent legs in reverse order first', async () => {
+    const strategy = {
+      ...baseStrategy,
+      positions: [{
+        id: 'position-1',
+        totalQuantity: 4,
+        totalCostQuote: 380,
+        dcaCount: 3,
+        recoveryMode: true,
+        recoveryDcaCount: 1,
+        recoveryAnchorPrice: 80,
+        recoveryTakeProfitPrice: 90,
+        nextDcaPrice: 73.6,
+        takeProfitPrice: null,
+        subPositions: [
+          { id: 'sub-4', level: 4, status: 'OPEN', quantity: 1, costQuote: 80, entryPrice: 80, takeProfitPrice: 81.2 },
+          { id: 'sub-5', level: 5, status: 'OPEN', quantity: 0.5, costQuote: 35, entryPrice: 70, takeProfitPrice: 71.05 },
+        ],
+      }],
+    };
+    const { service, testnetExecution } = createService([strategy], 91);
+
+    const result = await service.runUserStrategies(userId);
+
+    expect(result[0]).toMatchObject({ action: 'RECOVERY_TAKE_PROFIT', subPositionId: 'sub-5' });
+    expect(testnetExecution.executeMarketOrder).toHaveBeenCalledWith(
+      userId,
+      expect.objectContaining({
+        side: 'SELL',
+        actionType: 'INDEPENDENT_EXIT',
+        level: 5,
+        triggerPrice: 90,
       }),
     );
   });

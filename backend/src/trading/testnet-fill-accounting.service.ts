@@ -93,7 +93,15 @@ export class TestnetFillAccountingService {
         : await tx.tradingSubPosition.create({
             data: { positionId: position.id, level, status: 'OPEN', quantity, costQuote, entryPrice, takeProfitPrice },
           });
-      return { position, subPosition: saved };
+      const firstFillForOrder = Number(order.accountedFilledQuantity ?? 0) === 0;
+      if (!firstFillForOrder) return { position, subPosition: saved };
+      const dcaCount = Number(position.dcaCount ?? 0) + 1;
+      const nextDcaPrice = averageFillPrice * (1 - Number(strategy.dcaStepPercent) / 100);
+      const updatedPosition = await tx.tradingPosition.update({
+        where: { id: position.id },
+        data: { dcaCount, nextDcaPrice },
+      });
+      return { position: updatedPosition, subPosition: saved };
     }
 
     if (independentExit) {

@@ -47,12 +47,12 @@ describe('TestnetFillAccountingService', () => {
     });
   });
 
-  it('creates an independent sub-position without changing the parent', async () => {
+  it('creates an independent sub-position and advances the campaign level once', async () => {
     const tx = createTx();
     const position = { id: 'position-1', totalQuantity: 2, totalCostQuote: 200 };
 
     const result = await service.apply(tx, {
-      order: { side: 'BUY', independent: true, level: 5 },
+      order: { side: 'BUY', independent: true, level: 5, accountedFilledQuantity: 0 },
       position,
       subPosition: null,
       strategy,
@@ -61,8 +61,11 @@ describe('TestnetFillAccountingService', () => {
       averageFillPrice: 80,
     });
 
-    expect(tx.tradingPosition.update).not.toHaveBeenCalled();
-    expect(result.position).toBe(position);
+    expect(tx.tradingPosition.update).toHaveBeenCalledWith({
+      where: { id: 'position-1' },
+      data: { dcaCount: 1, nextDcaPrice: 76 },
+    });
+    expect(result.position).toMatchObject({ dcaCount: 1, nextDcaPrice: 76 });
     expect(result.subPosition).toMatchObject({
       quantity: 1,
       costQuote: 80,
@@ -83,7 +86,7 @@ describe('TestnetFillAccountingService', () => {
     });
 
     const result = await service.apply(tx, {
-      order: { side: 'BUY', independent: true, level: 5 },
+      order: { side: 'BUY', independent: true, level: 5, accountedFilledQuantity: 1 },
       position: { id: 'position-1' },
       subPosition: null,
       strategy,

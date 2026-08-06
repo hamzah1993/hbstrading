@@ -1,5 +1,6 @@
 import { NotFoundException } from '@nestjs/common';
 import { RiskAwareTestnetStrategyExecutionService } from './risk-aware-testnet-strategy-execution.service';
+import { RecoveryStrategyService } from './recovery-strategy.service';
 import { TestnetStrategyExecutionService } from './testnet-strategy-execution.service';
 
 describe('RiskAwareTestnetStrategyExecutionService', () => {
@@ -43,6 +44,7 @@ describe('RiskAwareTestnetStrategyExecutionService', () => {
       strategyActions,
       notifications,
       risk,
+      new RecoveryStrategyService(),
     );
 
     baseExecutionSpy = jest
