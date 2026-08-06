@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { RiskBudgetService } from './risk-budget.service';
+import { RecoveryStrategyService } from './recovery-strategy.service';
 
 interface OpenPaperPositionInput {
   strategyId: string;
@@ -13,7 +14,7 @@ interface AddPaperDcaInput {
   marketPrice: number;
 }
 
-type PaperTickAction = 'DCA' | 'TAKE_PROFIT' | 'HOLD';
+type PaperTickAction = 'DCA' | 'RECOVERY_DCA' | 'TAKE_PROFIT' | 'RECOVERY_TAKE_PROFIT' | 'HOLD';
 
 type PaperTickResult = {
   action: PaperTickAction;
@@ -26,6 +27,7 @@ export class PaperTradingService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly riskBudget: RiskBudgetService,
+    private readonly recoveryStrategy: RecoveryStrategyService,
   ) {}
 
   async openPosition(userId: string, input: OpenPaperPositionInput) {
@@ -119,6 +121,10 @@ export class PaperTradingService {
     if (marketPrice <= 0) throw new BadRequestException('Market price must be positive');
 
     let position = await this.getOpenPosition(userId, positionId);
+    if (position.recoveryMode) {
+      return this.processRecoveryPrice(position, marketPrice);
+    }
+
     position = await this.closeEligibleSubPositions(position, marketPrice);
 
     const takeProfitPrice = position.takeProfitPrice ? Number(position.takeProfitPrice) : null;
@@ -126,6 +132,24 @@ export class PaperTradingService {
 
     if (takeProfitPrice !== null && marketPrice >= takeProfitPrice) {
       return { action: 'TAKE_PROFIT', position: await this.executeClose(position, marketPrice) };
+    }
+
+    const recoveryAnchor = this.getRecoveryAnchor(position);
+    if (recoveryAnchor !== null) {
+      const basket = this.recoveryStrategy.basketTotals(position, position.subPositions);
+      const remainingRiskBudget = Math.max(Number(position.strategy.riskBudgetQuote) - basket.costQuote, 0);
+      const firstRecoveryLeg = this.recoveryStrategy.nextLeg(position.strategy, {
+        recoveryDcaCount: 0,
+        anchorPrice: recoveryAnchor,
+        baseOrderQuote: Number(position.strategy.baseOrderQuote),
+        remainingRiskBudget,
+      });
+      if (firstRecoveryLeg && marketPrice <= firstRecoveryLeg.triggerPrice) {
+        return {
+          action: 'RECOVERY_DCA',
+          position: await this.executeRecoveryDca(position, marketPrice, recoveryAnchor),
+        };
+      }
     }
 
     if (nextDcaPrice !== null && marketPrice <= nextDcaPrice) {
@@ -192,7 +216,8 @@ export class PaperTradingService {
     const allocation = plan.find((level) => level.level === nextLevel);
     if (!allocation) throw new BadRequestException('No further DCA allocation is available');
 
-    const alreadyAllocated = Number(position.totalCostQuote);
+    const basketBefore = this.recoveryStrategy.basketTotals(position, position.subPositions);
+    const alreadyAllocated = basketBefore.costQuote;
     this.riskBudget.assertWithinBudget(
       allocation.quoteAmount,
       alreadyAllocated,
@@ -200,13 +225,16 @@ export class PaperTradingService {
     );
 
     const quantity = allocation.quoteAmount / marketPrice;
-    const totalQuantity = Number(position.totalQuantity) + quantity;
-    const totalCostQuote = alreadyAllocated + allocation.quoteAmount;
-    const averageEntryPrice = totalCostQuote / totalQuantity;
+    const totalQuantity = allocation.independent
+      ? Number(position.totalQuantity)
+      : Number(position.totalQuantity) + quantity;
+    const totalCostQuote = allocation.independent
+      ? Number(position.totalCostQuote)
+      : Number(position.totalCostQuote) + allocation.quoteAmount;
+    const averageEntryPrice = totalQuantity > 0 ? totalCostQuote / totalQuantity : 0;
     const following = plan.find((level) => level.level === nextLevel + 1);
-    const baseEntryPrice = Number(position.orders[0]?.averageFillPrice ?? marketPrice);
     const nextDcaPrice = following
-      ? baseEntryPrice * (1 - following.triggerDropPercent / 100)
+      ? marketPrice * (1 - Number(position.strategy.dcaStepPercent) / 100)
       : null;
     const parentTakeProfitPrice =
       averageEntryPrice * (1 + Number(position.strategy.takeProfitPercent) / 100);
@@ -270,6 +298,190 @@ export class PaperTradingService {
     });
   }
 
+  private getRecoveryAnchor(position: any): number | null {
+    if (!this.recoveryStrategy.shouldActivate(
+      position.strategy,
+      Number(position.dcaCount) + 1,
+      Number(position.strategy.independentFromLevel),
+    )) return null;
+
+    const anchor = position.subPositions.find(
+      (subPosition: any) =>
+        Number(subPosition.level) === Number(position.strategy.independentFromLevel),
+    );
+    const anchorPrice = Number(anchor?.entryPrice ?? 0);
+    return Number.isFinite(anchorPrice) && anchorPrice > 0 ? anchorPrice : null;
+  }
+
+  private async processRecoveryPrice(position: any, marketPrice: number): Promise<PaperTickResult> {
+    const basket = this.recoveryStrategy.basketTotals(position, position.subPositions);
+    const takeProfitPrice = Number(
+      position.recoveryTakeProfitPrice ?? this.recoveryStrategy.globalTakeProfit(position.strategy, basket) ?? 0,
+    );
+    if (takeProfitPrice > 0 && marketPrice >= takeProfitPrice) {
+      return {
+        action: 'RECOVERY_TAKE_PROFIT',
+        position: await this.executeRecoveryClose(position, marketPrice),
+      };
+    }
+
+    const anchorPrice = Number(position.recoveryAnchorPrice ?? this.getRecoveryAnchor(position) ?? 0);
+    const remainingRiskBudget = Math.max(Number(position.strategy.riskBudgetQuote) - basket.costQuote, 0);
+    const leg = this.recoveryStrategy.nextLeg(position.strategy, {
+      recoveryDcaCount: Number(position.recoveryDcaCount),
+      anchorPrice,
+      baseOrderQuote: Number(position.strategy.baseOrderQuote),
+      remainingRiskBudget,
+    });
+    if (leg && marketPrice <= leg.triggerPrice) {
+      return {
+        action: 'RECOVERY_DCA',
+        position: await this.executeRecoveryDca(position, marketPrice, anchorPrice),
+      };
+    }
+
+    return {
+      action: 'HOLD',
+      position,
+      unrealizedPnlQuote: basket.quantity * marketPrice - basket.costQuote,
+    };
+  }
+
+  private async executeRecoveryDca(position: any, marketPrice: number, anchorPrice: number) {
+    const basketBefore = this.recoveryStrategy.basketTotals(position, position.subPositions);
+    const remainingRiskBudget = Math.max(
+      Number(position.strategy.riskBudgetQuote) - basketBefore.costQuote,
+      0,
+    );
+    const leg = this.recoveryStrategy.nextLeg(position.strategy, {
+      recoveryDcaCount: Number(position.recoveryDcaCount),
+      anchorPrice,
+      baseOrderQuote: Number(position.strategy.baseOrderQuote),
+      remainingRiskBudget,
+    });
+    if (!leg || leg.quoteAmount <= 0) {
+      throw new BadRequestException('No further recovery DCA allocation is available');
+    }
+    this.riskBudget.assertWithinBudget(
+      leg.quoteAmount,
+      basketBefore.costQuote,
+      Number(position.strategy.riskBudgetQuote),
+    );
+
+    const quantity = leg.quoteAmount / marketPrice;
+    const totalQuantity = Number(position.totalQuantity) + quantity;
+    const totalCostQuote = Number(position.totalCostQuote) + leg.quoteAmount;
+    const basketAfter = this.recoveryStrategy.basketTotals(
+      { totalQuantity, totalCostQuote },
+      position.subPositions,
+    );
+    const recoveryTakeProfitPrice = this.recoveryStrategy.globalTakeProfit(position.strategy, basketAfter);
+    const nextLeg = this.recoveryStrategy.nextLeg(position.strategy, {
+      recoveryDcaCount: Number(position.recoveryDcaCount) + 1,
+      anchorPrice,
+      baseOrderQuote: Number(position.strategy.baseOrderQuote),
+      remainingRiskBudget: Math.max(Number(position.strategy.riskBudgetQuote) - basketAfter.costQuote, 0),
+    });
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.tradingOrder.create({
+        data: {
+          userId: position.userId,
+          positionId: position.id,
+          clientOrderId: `paper-${randomUUID()}`,
+          side: 'BUY',
+          type: 'MARKET',
+          status: 'FILLED',
+          level: Number(position.strategy.maxDcaOrders) + Number(position.recoveryDcaCount) + 2,
+          independent: false,
+          quantity,
+          price: marketPrice,
+          filledQuantity: quantity,
+          quoteAmount: leg.quoteAmount,
+          averageFillPrice: marketPrice,
+        },
+      });
+
+      await tx.tradingPosition.update({
+        where: { id: position.id },
+        data: {
+          totalQuantity,
+          totalCostQuote,
+          averageEntryPrice: totalQuantity > 0 ? totalCostQuote / totalQuantity : 0,
+          recoveryMode: true,
+          recoveryDcaCount: Number(position.recoveryDcaCount) + 1,
+          recoveryAnchorPrice: anchorPrice,
+          recoveryTakeProfitPrice,
+          nextDcaPrice: nextLeg?.triggerPrice ?? null,
+          takeProfitPrice: null,
+        },
+      });
+
+      return tx.tradingPosition.findUnique({
+        where: { id: position.id },
+        include: {
+          orders: { orderBy: { createdAt: 'asc' } },
+          subPositions: { orderBy: { level: 'asc' } },
+          strategy: true,
+        },
+      });
+    });
+  }
+
+  private async executeRecoveryClose(position: any, marketPrice: number) {
+    const basket = this.recoveryStrategy.basketTotals(position, position.subPositions);
+    if (basket.quantity <= 0) throw new BadRequestException('Recovery basket has no open quantity');
+    const proceeds = basket.quantity * marketPrice;
+    const realizedPnlQuote = Number(position.realizedPnlQuote) + proceeds - basket.costQuote;
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.tradingOrder.create({
+        data: {
+          userId: position.userId,
+          positionId: position.id,
+          clientOrderId: `paper-${randomUUID()}`,
+          side: 'SELL',
+          type: 'MARKET',
+          status: 'FILLED',
+          level: Number(position.strategy.maxDcaOrders) + Number(position.recoveryDcaCount) + 2,
+          independent: false,
+          quantity: basket.quantity,
+          price: marketPrice,
+          filledQuantity: basket.quantity,
+          quoteAmount: proceeds,
+          averageFillPrice: marketPrice,
+        },
+      });
+      await tx.tradingSubPosition.updateMany({
+        where: { positionId: position.id, status: 'OPEN' },
+        data: { status: 'CLOSED', closedAt: new Date() },
+      });
+      await tx.tradingPosition.update({
+        where: { id: position.id },
+        data: {
+          status: 'CLOSED',
+          totalQuantity: 0,
+          totalCostQuote: 0,
+          averageEntryPrice: 0,
+          realizedPnlQuote,
+          closedAt: new Date(),
+          recoveryMode: false,
+          recoveryTakeProfitPrice: null,
+          nextDcaPrice: null,
+          takeProfitPrice: null,
+        },
+      });
+      return tx.tradingPosition.findUnique({
+        where: { id: position.id },
+        include: {
+          orders: { orderBy: { createdAt: 'asc' } },
+          subPositions: { orderBy: { level: 'asc' } },
+          strategy: true,
+        },
+      });
+    });
+  }
+
   private async closeEligibleSubPositions(position: any, marketPrice: number) {
     const eligible = position.subPositions.filter(
       (subPosition: any) =>
@@ -279,8 +491,6 @@ export class PaperTradingService {
     if (!eligible.length) return position;
 
     return this.prisma.$transaction(async (tx) => {
-      let totalQuantity = Number(position.totalQuantity);
-      let totalCostQuote = Number(position.totalCostQuote);
       let realizedPnlQuote = Number(position.realizedPnlQuote);
 
       for (const subPosition of eligible) {
@@ -316,16 +526,19 @@ export class PaperTradingService {
           },
         });
 
-        totalQuantity -= quantity;
-        totalCostQuote -= costQuote;
         realizedPnlQuote += pnl;
       }
 
+      const totalQuantity = Number(position.totalQuantity);
+      const totalCostQuote = Number(position.totalCostQuote);
       const averageEntryPrice = totalQuantity > 0 ? totalCostQuote / totalQuantity : 0;
       const takeProfitPrice =
         totalQuantity > 0
           ? averageEntryPrice * (1 + Number(position.strategy.takeProfitPercent) / 100)
           : null;
+      const closed = totalQuantity <= 1e-12 && position.subPositions.every(
+        (subPosition: any) => subPosition.status !== 'OPEN' || eligible.some((item: any) => item.id === subPosition.id),
+      );
 
       await tx.tradingPosition.update({
         where: { id: position.id },
@@ -335,6 +548,8 @@ export class PaperTradingService {
           averageEntryPrice,
           realizedPnlQuote,
           takeProfitPrice,
+          status: closed ? 'CLOSED' : 'OPEN',
+          closedAt: closed ? new Date() : null,
         },
       });
 
@@ -351,9 +566,11 @@ export class PaperTradingService {
 
   private async executeClose(position: any, marketPrice: number) {
     const quantity = Number(position.totalQuantity);
+    if (quantity <= 0) throw new BadRequestException('Parent position has no open quantity');
     const proceeds = quantity * marketPrice;
     const realizedPnlQuote =
       Number(position.realizedPnlQuote) + proceeds - Number(position.totalCostQuote);
+    const hasOpenIndependent = position.subPositions.some((subPosition: any) => subPosition.status === 'OPEN');
 
     return this.prisma.$transaction(async (tx) => {
       await tx.tradingOrder.create({
@@ -374,17 +591,15 @@ export class PaperTradingService {
         },
       });
 
-      await tx.tradingSubPosition.updateMany({
-        where: { positionId: position.id, status: 'OPEN' },
-        data: { status: 'CLOSED', closedAt: new Date() },
-      });
-
       await tx.tradingPosition.update({
         where: { id: position.id },
         data: {
-          status: 'CLOSED',
+          status: hasOpenIndependent ? 'OPEN' : 'CLOSED',
+          totalQuantity: 0,
+          totalCostQuote: 0,
+          averageEntryPrice: 0,
           realizedPnlQuote,
-          closedAt: new Date(),
+          closedAt: hasOpenIndependent ? null : new Date(),
           nextDcaPrice: null,
           takeProfitPrice: null,
         },
