@@ -56,6 +56,14 @@ export class BacktestCandleRunnerService {
         volumeMultiplier: run.strategy.dcaMultiplier,
         takeProfitPercent: run.strategy.takeProfitPercent,
         independentFromLevel: run.strategy.independentFromLevel,
+        riskBudgetQuote: run.strategy.riskBudgetQuote,
+        baseOrderQuote: run.strategy.baseOrderQuote,
+        recoveryEnabled: run.strategy.recoveryEnabled,
+        recoveryMaxOrders: run.strategy.recoveryMaxOrders,
+        recoveryStepPercents: run.strategy.recoveryStepPercents as number[],
+        recoveryMultipliers: run.strategy.recoveryMultipliers as number[],
+        recoveryTakeProfitPercent: run.strategy.recoveryTakeProfitPercent,
+        continuousCycles: true,
       });
 
       return this.execution.complete(run.id, result);

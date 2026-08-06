@@ -1,9 +1,10 @@
 import { BadRequestException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { BacktestDcaSimulatorService } from './backtest-dca-simulator.service';
+import { RecoveryStrategyService } from './recovery-strategy.service';
 
 describe('BacktestDcaSimulatorService', () => {
-  const service = new BacktestDcaSimulatorService();
+  const service = new BacktestDcaSimulatorService(new RecoveryStrategyService());
 
   it('allocates capital across triggered DCA entries', () => {
     const result = service.simulate({
@@ -126,6 +127,56 @@ describe('BacktestDcaSimulatorService', () => {
     expect(result.tradeCount).toBe(3);
     expect(result.endingCapital).toBe('970.21442495');
     expect(result.realizedPnlQuote).toBe('-29.78557505');
+  });
+
+  it('simulates recovery DCA and exits the weighted basket at the global TP', () => {
+    const result = service.simulate({
+      initialCapital: 1000,
+      riskBudgetQuote: 500,
+      baseOrderQuote: 100,
+      candles: [{ close: 100 }, { close: 95 }, { close: 90 }, { close: 85 }, { close: 94 }],
+      maxEntries: 3,
+      priceDeviationPercent: 5,
+      volumeMultiplier: 1,
+      takeProfitPercent: 1.5,
+      independentFromLevel: 3,
+      recoveryEnabled: true,
+      recoveryMaxOrders: 5,
+      recoveryStepPercents: [5, 8, 12, 18, 25],
+      recoveryMultipliers: [1, 1.5, 2, 3, 5],
+      recoveryTakeProfitPercent: 1.5,
+    });
+
+    expect(result.tradeCount).toBe(6);
+    expect(result.trades!.map((trade) => trade.type)).toEqual([
+      'PARENT_ENTRY',
+      'PARENT_ENTRY',
+      'INDEPENDENT_ENTRY',
+      'RECOVERY_ENTRY',
+      'INDEPENDENT_EXIT',
+      'PARENT_EXIT',
+    ]);
+    expect(Number(result.endingCapital)).toBeGreaterThan(1000);
+  });
+
+  it('can restart completed campaigns for continuous 24/7 backtests', () => {
+    const result = service.simulate({
+      initialCapital: 1000,
+      riskBudgetQuote: 100,
+      baseOrderQuote: 100,
+      candles: [{ close: 100 }, { close: 110 }, { close: 100 }],
+      maxEntries: 1,
+      priceDeviationPercent: 5,
+      takeProfitPercent: 5,
+      continuousCycles: true,
+    });
+
+    expect(result.trades!.map((trade) => trade.type)).toEqual([
+      'PARENT_ENTRY',
+      'PARENT_EXIT',
+      'PARENT_ENTRY',
+    ]);
+    expect(result.tradeCount).toBe(3);
   });
 
   it('rejects an empty candle collection', () => {

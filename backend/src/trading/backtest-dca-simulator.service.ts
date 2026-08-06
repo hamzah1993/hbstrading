@@ -6,6 +6,7 @@ import type {
   BacktestSimulationResult,
   BacktestSimulationTrade,
 } from './backtest-buy-hold-simulator.service';
+import { RecoveryStrategyService } from './recovery-strategy.service';
 
 export type BacktestDcaSimulationInput = {
   initialCapital: Prisma.Decimal | string | number;
@@ -17,6 +18,14 @@ export type BacktestDcaSimulationInput = {
   independentFromLevel?: number;
   feePercent?: Prisma.Decimal | string | number;
   slippagePercent?: Prisma.Decimal | string | number;
+  riskBudgetQuote?: Prisma.Decimal | string | number;
+  baseOrderQuote?: Prisma.Decimal | string | number;
+  recoveryEnabled?: boolean;
+  recoveryMaxOrders?: number;
+  recoveryStepPercents?: number[];
+  recoveryMultipliers?: number[];
+  recoveryTakeProfitPercent?: Prisma.Decimal | string | number;
+  continuousCycles?: boolean;
 };
 
 type IndependentPosition = {
@@ -27,6 +36,8 @@ type IndependentPosition = {
 
 @Injectable()
 export class BacktestDcaSimulatorService {
+  constructor(private readonly recoveryStrategy: RecoveryStrategyService) {}
+
   simulate(input: BacktestDcaSimulationInput): BacktestSimulationResult {
     if (input.candles.length === 0) {
       throw new BadRequestException('At least one historical candle is required');
@@ -55,6 +66,20 @@ export class BacktestDcaSimulatorService {
         : new Prisma.Decimal(input.takeProfitPercent);
     const feePercent = new Prisma.Decimal(input.feePercent ?? 0);
     const slippagePercent = new Prisma.Decimal(input.slippagePercent ?? 0);
+    const riskBudgetQuote = input.riskBudgetQuote === undefined
+      ? null
+      : new Prisma.Decimal(input.riskBudgetQuote);
+    const baseOrderQuote = input.baseOrderQuote === undefined
+      ? null
+      : new Prisma.Decimal(input.baseOrderQuote);
+    const recoveryConfig = {
+      recoveryEnabled: input.recoveryEnabled ?? false,
+      recoveryMaxOrders: input.recoveryMaxOrders ?? 5,
+      recoveryStepPercents: input.recoveryStepPercents ?? [5, 8, 12, 18, 25],
+      recoveryMultipliers: input.recoveryMultipliers ?? [1, 1.5, 2, 3, 5],
+      recoveryTakeProfitPercent: Number(input.recoveryTakeProfitPercent ?? 1.5),
+    };
+    this.recoveryStrategy.normalizeConfig(recoveryConfig);
 
     if (initialCapital.lessThanOrEqualTo(0)) {
       throw new BadRequestException('Initial capital must be positive');
@@ -76,6 +101,15 @@ export class BacktestDcaSimulatorService {
     }
     if (slippagePercent.isNegative() || slippagePercent.greaterThanOrEqualTo(100)) {
       throw new BadRequestException('Slippage percent must be between 0 and 100');
+    }
+    if (riskBudgetQuote !== null && riskBudgetQuote.lessThanOrEqualTo(0)) {
+      throw new BadRequestException('Risk budget must be positive');
+    }
+    if (baseOrderQuote !== null && baseOrderQuote.lessThanOrEqualTo(0)) {
+      throw new BadRequestException('Base order must be positive');
+    }
+    if ((riskBudgetQuote === null) !== (baseOrderQuote === null)) {
+      throw new BadRequestException('Risk budget and base order must be supplied together');
     }
 
     const prices = input.candles.map((candle) => new Prisma.Decimal(candle.close));
@@ -103,32 +137,56 @@ export class BacktestDcaSimulatorService {
     const trades: BacktestSimulationTrade[] = [];
     const equityPoints: BacktestSimulationEquityPoint[] = [];
     let entries = 0;
+    let entryTrades = 0;
     let exits = 0;
     let peakEquity = initialCapital;
     let maxDrawdownPercent = new Prisma.Decimal(0);
-    const entryPrice = prices[0];
+    let cycleEntryPrice = prices[0];
+    let recoveryMode = false;
+    let recoveryDcaCount = 0;
+    let recoveryAnchorPrice: Prisma.Decimal | null = null;
+    let awaitingNewCycle = false;
+
+    const currentExposure = () => independentPositions.reduce(
+      (sum, position) => sum.add(position.costQuote),
+      parentCostQuote,
+    );
 
     for (let candleIndex = 0; candleIndex < prices.length; candleIndex += 1) {
       const marketPrice = prices[candleIndex];
       const executedAt =
         input.candles[candleIndex].openTime ?? new Date(candleIndex);
 
-      while (entries < input.maxEntries) {
-        const triggerPrice = entryPrice.mul(
+      if (input.continuousCycles && awaitingNewCycle) {
+        entries = 0;
+        recoveryMode = false;
+        recoveryDcaCount = 0;
+        recoveryAnchorPrice = null;
+        cycleEntryPrice = marketPrice;
+        awaitingNewCycle = false;
+      }
+
+      while (!recoveryMode && entries < input.maxEntries) {
+        const triggerPrice = cycleEntryPrice.mul(
           new Prisma.Decimal(1).sub(
             priceDeviationPercent.mul(entries).div(100),
           ),
         );
         if (marketPrice.greaterThan(triggerPrice)) break;
 
-        const allocation = initialCapital.mul(weights[entries]).div(totalWeight);
-        const spend = Prisma.Decimal.min(allocation, quoteBalance);
-        if (!spend.isPositive()) break;
+        const allocation = baseOrderQuote === null
+          ? initialCapital.mul(weights[entries]).div(totalWeight)
+          : baseOrderQuote.mul(volumeMultiplier.pow(entries));
+        const riskRemaining = riskBudgetQuote === null
+          ? quoteBalance
+          : Prisma.Decimal.max(riskBudgetQuote.sub(currentExposure()), 0);
+        const spend = Prisma.Decimal.min(allocation, quoteBalance, riskRemaining);
+        if (!spend.greaterThan(0)) break;
 
         const feeQuote = spend.mul(feeRate);
         const quoteForAsset = spend.sub(feeQuote);
         const executionPrice = marketPrice.mul(buySlippageFactor);
-        if (!quoteForAsset.isPositive() || !executionPrice.isPositive()) break;
+        if (!quoteForAsset.greaterThan(0) || !executionPrice.greaterThan(0)) break;
 
         quoteBalance = quoteBalance.sub(spend);
         const quantity = quoteForAsset.div(executionPrice);
@@ -155,11 +213,118 @@ export class BacktestDcaSimulatorService {
           feeQuote: feeQuote.toFixed(8),
         });
         entries += 1;
+        entryTrades += 1;
+      }
+
+      const recoveryAnchor = independentPositions.find(
+        (position) => position.level === independentFromLevel,
+      );
+      if (!recoveryMode && recoveryAnchor && recoveryConfig.recoveryEnabled) {
+        recoveryAnchorPrice = recoveryAnchor.costQuote.div(recoveryAnchor.quantity);
+      }
+
+      while (recoveryAnchorPrice !== null && recoveryConfig.recoveryEnabled) {
+        const exposure = currentExposure();
+        const riskRemaining = riskBudgetQuote === null
+          ? quoteBalance
+          : Prisma.Decimal.max(riskBudgetQuote.sub(exposure), 0);
+        const leg = this.recoveryStrategy.nextLeg(recoveryConfig, {
+          recoveryDcaCount,
+          anchorPrice: recoveryAnchorPrice.toNumber(),
+          baseOrderQuote: Number(baseOrderQuote ?? initialCapital.div(totalWeight)),
+          remainingRiskBudget: Prisma.Decimal.min(riskRemaining, quoteBalance).toNumber(),
+        });
+        if (!leg || marketPrice.greaterThan(leg.triggerPrice) || leg.quoteAmount <= 0) break;
+
+        const spend = Prisma.Decimal.min(new Prisma.Decimal(leg.quoteAmount), quoteBalance, riskRemaining);
+        if (!spend.greaterThan(0)) break;
+        const feeQuote = spend.mul(feeRate);
+        const quoteForAsset = spend.sub(feeQuote);
+        const executionPrice = marketPrice.mul(buySlippageFactor);
+        if (!quoteForAsset.greaterThan(0) || !executionPrice.greaterThan(0)) break;
+
+        quoteBalance = quoteBalance.sub(spend);
+        const quantity = quoteForAsset.div(executionPrice);
+        parentQuantity = parentQuantity.add(quantity);
+        parentCostQuote = parentCostQuote.add(spend);
+        recoveryMode = true;
+        recoveryDcaCount += 1;
+        entryTrades += 1;
+        trades.push({
+          type: BacktestTradeType.RECOVERY_ENTRY,
+          level: input.maxEntries + recoveryDcaCount,
+          independent: false,
+          executedAt,
+          price: executionPrice.toFixed(12),
+          quantity: quantity.toFixed(12),
+          quoteAmount: spend.toFixed(8),
+          feeQuote: feeQuote.toFixed(8),
+        });
       }
 
       if (takeProfitPercent !== null) {
+        if (recoveryMode) {
+          const basketQuantity = independentPositions.reduce(
+            (sum, position) => sum.add(position.quantity),
+            parentQuantity,
+          );
+          const basketCost = currentExposure();
+          const globalTakeProfit = basketQuantity.greaterThan(0)
+            ? basketCost.div(basketQuantity).mul(
+                new Prisma.Decimal(1).add(new Prisma.Decimal(recoveryConfig.recoveryTakeProfitPercent).div(100)),
+              )
+            : null;
+          if (globalTakeProfit && marketPrice.greaterThanOrEqualTo(globalTakeProfit)) {
+            for (let index = independentPositions.length - 1; index >= 0; index -= 1) {
+              const position = independentPositions[index];
+              const executionPrice = marketPrice.mul(sellSlippageFactor);
+              const grossProceeds = position.quantity.mul(executionPrice);
+              const feeQuote = grossProceeds.mul(feeRate);
+              const netProceeds = grossProceeds.sub(feeQuote);
+              quoteBalance = quoteBalance.add(netProceeds);
+              trades.push({
+                type: BacktestTradeType.INDEPENDENT_EXIT,
+                level: position.level,
+                independent: true,
+                executedAt,
+                price: executionPrice.toFixed(12),
+                quantity: position.quantity.toFixed(12),
+                quoteAmount: grossProceeds.toFixed(8),
+                feeQuote: feeQuote.toFixed(8),
+                realizedPnlQuote: netProceeds.sub(position.costQuote).toFixed(8),
+              });
+              exits += 1;
+            }
+            independentPositions.splice(0, independentPositions.length);
+
+            if (parentQuantity.greaterThan(0)) {
+              const executionPrice = marketPrice.mul(sellSlippageFactor);
+              const grossProceeds = parentQuantity.mul(executionPrice);
+              const feeQuote = grossProceeds.mul(feeRate);
+              const netProceeds = grossProceeds.sub(feeQuote);
+              quoteBalance = quoteBalance.add(netProceeds);
+              trades.push({
+                type: BacktestTradeType.PARENT_EXIT,
+                level: input.maxEntries + recoveryDcaCount,
+                independent: false,
+                executedAt,
+                price: executionPrice.toFixed(12),
+                quantity: parentQuantity.toFixed(12),
+                quoteAmount: grossProceeds.toFixed(8),
+                feeQuote: feeQuote.toFixed(8),
+                realizedPnlQuote: netProceeds.sub(parentCostQuote).toFixed(8),
+              });
+              parentQuantity = new Prisma.Decimal(0);
+              parentCostQuote = new Prisma.Decimal(0);
+              exits += 1;
+            }
+            recoveryMode = false;
+            recoveryDcaCount = 0;
+            recoveryAnchorPrice = null;
+          }
+        } else {
         if (
-          parentQuantity.isPositive() &&
+          parentQuantity.greaterThan(0) &&
           marketPrice.greaterThanOrEqualTo(
             parentCostQuote
               .div(parentQuantity)
@@ -215,6 +380,16 @@ export class BacktestDcaSimulatorService {
             exits += 1;
           }
         }
+        }
+      }
+
+      if (
+        input.continuousCycles &&
+        entries > 0 &&
+        !parentQuantity.greaterThan(0) &&
+        independentPositions.length === 0
+      ) {
+        awaitingNewCycle = true;
       }
 
       const independentEquity = independentPositions.reduce(
@@ -257,7 +432,7 @@ export class BacktestDcaSimulatorService {
       realizedPnlQuote: realizedPnlQuote.toFixed(8),
       returnPercent: returnPercent.toFixed(6),
       maxDrawdownPercent: maxDrawdownPercent.toFixed(6),
-      tradeCount: entries + exits,
+      tradeCount: entryTrades + exits,
       trades,
       equityPoints,
     };

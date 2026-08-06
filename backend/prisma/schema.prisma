@@ -109,6 +109,7 @@ enum BacktestRunStatus {
 enum BacktestTradeType {
   PARENT_ENTRY
   INDEPENDENT_ENTRY
+  RECOVERY_ENTRY
   PARENT_EXIT
   INDEPENDENT_EXIT
 }

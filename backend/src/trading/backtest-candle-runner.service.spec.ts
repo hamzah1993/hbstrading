@@ -45,6 +45,15 @@ describe('BacktestCandleRunnerService', () => {
         maxDcaOrders: 3,
         dcaStepPercent: '5',
         dcaMultiplier: '1.5',
+        takeProfitPercent: '1.5',
+        independentFromLevel: 4,
+        riskBudgetQuote: '1000',
+        baseOrderQuote: '100',
+        recoveryEnabled: true,
+        recoveryMaxOrders: 5,
+        recoveryStepPercents: [5, 8, 12, 18, 25],
+        recoveryMultipliers: [1, 1.5, 2, 3, 5],
+        recoveryTakeProfitPercent: '1.5',
       },
       ...overrides,
     };
@@ -98,6 +107,16 @@ describe('BacktestCandleRunnerService', () => {
       maxEntries: 4,
       priceDeviationPercent: '5',
       volumeMultiplier: '1.5',
+      takeProfitPercent: '1.5',
+      independentFromLevel: 4,
+      riskBudgetQuote: '1000',
+      baseOrderQuote: '100',
+      recoveryEnabled: true,
+      recoveryMaxOrders: 5,
+      recoveryStepPercents: [5, 8, 12, 18, 25],
+      recoveryMultipliers: [1, 1.5, 2, 3, 5],
+      recoveryTakeProfitPercent: '1.5',
+      continuousCycles: true,
     });
     expect(execution.complete).toHaveBeenCalledWith('run-1', result);
     expect(execution.fail).not.toHaveBeenCalled();
@@ -157,6 +176,16 @@ describe('BacktestCandleRunnerService', () => {
       maxEntries: 4,
       priceDeviationPercent: '5',
       volumeMultiplier: '1.5',
+      takeProfitPercent: '1.5',
+      independentFromLevel: 4,
+      riskBudgetQuote: '1000',
+      baseOrderQuote: '100',
+      recoveryEnabled: true,
+      recoveryMaxOrders: 5,
+      recoveryStepPercents: [5, 8, 12, 18, 25],
+      recoveryMultipliers: [1, 1.5, 2, 3, 5],
+      recoveryTakeProfitPercent: '1.5',
+      continuousCycles: true,
     });
   });
 
@@ -253,6 +282,16 @@ describe('BacktestCandleRunnerService', () => {
       maxEntries: 4,
       priceDeviationPercent: '5',
       volumeMultiplier: '1.5',
+      takeProfitPercent: '1.5',
+      independentFromLevel: 4,
+      riskBudgetQuote: '1000',
+      baseOrderQuote: '100',
+      recoveryEnabled: true,
+      recoveryMaxOrders: 5,
+      recoveryStepPercents: [5, 8, 12, 18, 25],
+      recoveryMultipliers: [1, 1.5, 2, 3, 5],
+      recoveryTakeProfitPercent: '1.5',
+      continuousCycles: true,
     });
     expect(execution.complete).not.toHaveBeenCalled();
     expect(execution.fail).toHaveBeenCalledWith('run-1', error);
