@@ -119,7 +119,10 @@ describe('PaperTradingService recovery mode', () => {
     expect(tx.tradingOrder.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ side: 'SELL', quantity: 5, quoteAmount: 470 }),
     }));
-    expect(tx.tradingSubPosition.updateMany).toHaveBeenCalled();
+    expect(tx.tradingSubPosition.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'sub-5' },
+      data: expect.objectContaining({ status: 'CLOSED', quantity: 0, costQuote: 0 }),
+    }));
     expect(tx.tradingPosition.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         status: 'CLOSED',

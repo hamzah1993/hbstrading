@@ -452,10 +452,22 @@ export class PaperTradingService {
           averageFillPrice: marketPrice,
         },
       });
-      await tx.tradingSubPosition.updateMany({
-        where: { positionId: position.id, status: 'OPEN' },
-        data: { status: 'CLOSED', closedAt: new Date() },
-      });
+      for (const subPosition of position.subPositions.filter((item: any) => item.status === 'OPEN')) {
+        const quantity = Number(subPosition.quantity);
+        const costQuote = Number(subPosition.costQuote);
+        await tx.tradingSubPosition.update({
+          where: { id: subPosition.id },
+          data: {
+            status: 'CLOSED',
+            quantity: 0,
+            costQuote: 0,
+            entryPrice: 0,
+            realizedPnlQuote:
+              Number(subPosition.realizedPnlQuote ?? 0) + quantity * marketPrice - costQuote,
+            closedAt: new Date(),
+          },
+        });
+      }
       await tx.tradingPosition.update({
         where: { id: position.id },
         data: {

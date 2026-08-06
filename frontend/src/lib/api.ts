@@ -50,11 +50,11 @@ export type BinanceKlineInterval =
   | '1w'
   | '1M';
 export type TestnetOrderStatus = 'PENDING' | 'PARTIALLY_FILLED' | 'FILLED' | 'REJECTED' | 'CANCELLED';
-export type TestnetActionType = 'INITIAL_ENTRY' | 'DCA_ENTRY' | 'INDEPENDENT_ENTRY' | 'PARENT_EXIT' | 'INDEPENDENT_EXIT';
+export type TestnetActionType = 'INITIAL_ENTRY' | 'DCA_ENTRY' | 'INDEPENDENT_ENTRY' | 'RECOVERY_DCA_ENTRY' | 'PARENT_EXIT' | 'INDEPENDENT_EXIT';
 export type TestnetActionStatus = 'PENDING' | 'SUBMITTED' | 'COMPLETED' | 'FAILED';
 export type NotificationSeverity = 'INFO' | 'WARNING' | 'CRITICAL';
 export type BacktestRunStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED';
-export type BacktestTradeType = 'PARENT_ENTRY' | 'INDEPENDENT_ENTRY' | 'PARENT_EXIT' | 'INDEPENDENT_EXIT';
+export type BacktestTradeType = 'PARENT_ENTRY' | 'INDEPENDENT_ENTRY' | 'RECOVERY_ENTRY' | 'PARENT_EXIT' | 'INDEPENDENT_EXIT';
 
 export type TestnetRunnerHealth = {
   scheduler: 'HEALTHY' | 'DELAYED' | 'ERROR' | 'IDLE';
@@ -149,6 +149,11 @@ export type TradingStrategy = {
   dcaMultiplier?: string;
   takeProfitPercent?: string;
   independentFromLevel?: number;
+  recoveryEnabled?: boolean;
+  recoveryMaxOrders?: number;
+  recoveryStepPercents?: number[];
+  recoveryMultipliers?: number[];
+  recoveryTakeProfitPercent?: string;
 };
 
 export type TradingPosition = {
@@ -160,6 +165,10 @@ export type TradingPosition = {
   averageEntryPrice: string;
   realizedPnlQuote: string;
   dcaCount: number;
+  recoveryMode: boolean;
+  recoveryDcaCount: number;
+  recoveryAnchorPrice: string | null;
+  recoveryTakeProfitPrice: string | null;
   nextDcaPrice: string | null;
   takeProfitPrice: string | null;
   openedAt: string;
@@ -294,6 +303,10 @@ export type TestnetPosition = {
   averageEntryPrice: string;
   realizedPnlQuote: string;
   dcaCount: number;
+  recoveryMode: boolean;
+  recoveryDcaCount: number;
+  recoveryAnchorPrice: string | null;
+  recoveryTakeProfitPrice: string | null;
   nextDcaPrice: string | null;
   takeProfitPrice: string | null;
   openedAt: string;
@@ -413,6 +426,11 @@ export type CreateStrategyPayload = {
   dcaMultiplier: number;
   takeProfitPercent: number;
   independentFromLevel: number;
+  recoveryEnabled: boolean;
+  recoveryMaxOrders: number;
+  recoveryStepPercents: number[];
+  recoveryMultipliers: number[];
+  recoveryTakeProfitPercent: number;
 };
 
 export type CreateBacktestPayload = {

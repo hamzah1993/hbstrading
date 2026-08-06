@@ -22,6 +22,10 @@ type UnifiedPosition = {
   averageEntryPrice: string;
   realizedPnlQuote: string;
   dcaCount: number;
+  recoveryMode: boolean;
+  recoveryDcaCount: number;
+  recoveryAnchorPrice: string | null;
+  recoveryTakeProfitPrice: string | null;
   maxDcaOrders: number;
   nextDcaPrice: string | null;
   takeProfitPrice: string | null;
@@ -101,6 +105,10 @@ export function UnifiedPositionsPanel({ token, initialPositionId = null, initial
       averageEntryPrice: position.averageEntryPrice,
       realizedPnlQuote: position.realizedPnlQuote,
       dcaCount: position.dcaCount,
+      recoveryMode: position.recoveryMode,
+      recoveryDcaCount: position.recoveryDcaCount,
+      recoveryAnchorPrice: position.recoveryAnchorPrice,
+      recoveryTakeProfitPrice: position.recoveryTakeProfitPrice,
       maxDcaOrders: position.strategy.maxDcaOrders,
       nextDcaPrice: position.nextDcaPrice,
       takeProfitPrice: position.takeProfitPrice,
@@ -121,6 +129,10 @@ export function UnifiedPositionsPanel({ token, initialPositionId = null, initial
       averageEntryPrice: position.averageEntryPrice,
       realizedPnlQuote: position.realizedPnlQuote,
       dcaCount: position.dcaCount,
+      recoveryMode: position.recoveryMode,
+      recoveryDcaCount: position.recoveryDcaCount,
+      recoveryAnchorPrice: position.recoveryAnchorPrice,
+      recoveryTakeProfitPrice: position.recoveryTakeProfitPrice,
       maxDcaOrders: position.strategy.maxDcaOrders,
       nextDcaPrice: position.nextDcaPrice,
       takeProfitPrice: position.takeProfitPrice,
@@ -236,7 +248,13 @@ export function UnifiedPositionsPanel({ token, initialPositionId = null, initial
     const open = allPositions.filter((position) => position.status === 'OPEN');
     const unrealized = open.reduce((sum, position) => {
       const currentPrice = prices[position.symbol] ?? Number(position.averageEntryPrice);
-      return sum + currentPrice * Number(position.totalQuantity) - Number(position.totalCostQuote);
+      const independentQuantity = position.subPositions
+        .filter((subPosition) => subPosition.status === 'OPEN')
+        .reduce((quantity, subPosition) => quantity + Number(subPosition.quantity), 0);
+      const independentCost = position.subPositions
+        .filter((subPosition) => subPosition.status === 'OPEN')
+        .reduce((cost, subPosition) => cost + Number(subPosition.costQuote), 0);
+      return sum + currentPrice * (Number(position.totalQuantity) + independentQuantity) - (Number(position.totalCostQuote) + independentCost);
     }, 0);
     const realized = allPositions.reduce((sum, position) => sum + Number(position.realizedPnlQuote), 0);
     return {
@@ -290,8 +308,13 @@ export function UnifiedPositionsPanel({ token, initialPositionId = null, initial
           {filtered.map((position) => {
             const expanded = expandedId === position.id;
             const currentPrice = prices[position.symbol] ?? Number(position.averageEntryPrice);
-            const currentValue = currentPrice * Number(position.totalQuantity);
-            const unrealized = position.status === 'OPEN' ? currentValue - Number(position.totalCostQuote) : 0;
+            const openIndependent = position.subPositions.filter((subPosition) => subPosition.status === 'OPEN');
+            const independentQuantity = openIndependent.reduce((sum, subPosition) => sum + Number(subPosition.quantity), 0);
+            const independentCost = openIndependent.reduce((sum, subPosition) => sum + Number(subPosition.costQuote), 0);
+            const basketQuantity = Number(position.totalQuantity) + independentQuantity;
+            const basketCost = Number(position.totalCostQuote) + independentCost;
+            const currentValue = currentPrice * basketQuantity;
+            const unrealized = position.status === 'OPEN' ? currentValue - basketCost : 0;
             const realized = Number(position.realizedPnlQuote);
             const total = unrealized + realized;
             const hasPendingOrder = position.orders.some((order) => order.status === 'PENDING' || order.status === 'PARTIALLY_FILLED');
@@ -303,6 +326,7 @@ export function UnifiedPositionsPanel({ token, initialPositionId = null, initial
                       <h4 className="text-lg font-semibold">{position.symbol}</h4>
                       <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${position.source === 'PAPER' ? 'bg-violet-400/15 text-violet-300' : 'bg-cyan-400/15 text-cyan-300'}`}>{position.source === 'PAPER' ? 'Paper' : 'Binance Testnet'}</span>
                       <span className="rounded-full bg-emerald-400/15 px-2.5 py-1 text-xs text-emerald-300">{position.status}</span>
+                      {position.recoveryMode && <span className="rounded-full bg-amber-400/15 px-2.5 py-1 text-xs font-semibold text-amber-300">RECOVERY</span>}
                     </div>
                     <p className="mt-2 text-sm text-slate-400">{position.strategyName}</p>
                     <p className="mt-1 text-xs text-slate-600">Opened {new Date(position.openedAt).toLocaleString()}</p>
@@ -316,11 +340,14 @@ export function UnifiedPositionsPanel({ token, initialPositionId = null, initial
                   <div className="border-t border-white/10 p-5">
                     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                       <Metric label="Average entry" value={number(position.averageEntryPrice)} />
-                      <Metric label="Open quantity" value={number(position.totalQuantity)} />
+                      <Metric label="Basket quantity" value={number(basketQuantity)} />
                       <Metric label="Current value" value={money(currentValue)} />
-                      <Metric label="Allocated cost" value={money(position.totalCostQuote)} />
+                      <Metric label="Basket cost" value={money(basketCost)} />
                       <Metric label="Next DCA" value={position.nextDcaPrice ? number(position.nextDcaPrice) : '—'} />
                       <Metric label="Take profit" value={position.takeProfitPrice ? number(position.takeProfitPrice) : '—'} />
+                      <Metric label="Recovery orders" value={position.recoveryMode ? String(position.recoveryDcaCount) : '—'} />
+                      <Metric label="Recovery global TP" value={position.recoveryTakeProfitPrice ? number(position.recoveryTakeProfitPrice) : '—'} />
+                      <Metric label="Recovery anchor" value={position.recoveryAnchorPrice ? number(position.recoveryAnchorPrice) : '—'} />
                       <Metric label="Realized P&L" value={money(realized)} />
                       <Metric label="Strategy state" value={position.strategyStatus ?? 'STOPPED'} />
                     </div>
